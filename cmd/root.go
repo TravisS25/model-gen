@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/TravisS25/modelgen/app"
+	"github.com/TravisS25/model-gen/app"
 	"github.com/spf13/cobra"
 
 	homedir "github.com/mitchellh/go-homedir"

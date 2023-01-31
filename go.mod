@@ -1,4 +1,4 @@
-module github.com/TravisS25/modelgen
+module github.com/TravisS25/model-gen
 
 go 1.18
 

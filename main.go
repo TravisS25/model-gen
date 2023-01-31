@@ -15,7 +15,7 @@ limitations under the License.
 */
 package main
 
-import "github.com/TravisS25/modelgen/cmd"
+import "github.com/TravisS25/model-gen/cmd"
 
 func main() {
 	cmd.Execute()
