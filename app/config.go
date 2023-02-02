@@ -1,12 +1,24 @@
 package app
 
+type DBDriver string
+
 var (
-	DBDrivers = []string{"mysql", "sqlite", "postgres"}
+	PostgresDriver DBDriver = "postgres"
+	SqliteDriver   DBDriver = "sqlite"
+	MysqlDriver    DBDriver = "mysql"
 )
 
 type GenerateModelConfig struct {
-	Driver       string
-	URL          string
-	QueryOutPath string
-	ModelOutPath string
+	Driver DBDriver
+	URL    string
+
+	FieldNullable     bool
+	FieldCoverable    bool
+	FieldSignable     bool
+	FieldWithIndexTag bool
+	FieldWithTypeTag  bool
+	OutFile           string
+	QueryOutPath      string
+	ModelOutPath      string
+	Schema            string
 }
