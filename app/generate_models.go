@@ -1,57 +1,53 @@
 package app
 
 import (
+	"errors"
 	"fmt"
-	"log"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/kenshaw/snaker"
-	"gorm.io/driver/mysql"
-	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gen"
 	"gorm.io/gorm"
 )
+
+const (
+	packageErr = "model-gen: %w: %s"
+)
+
+var (
+	sqlAnyMatcher = sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+		return nil
+	})
+
+	ErrMustSetSchema    = errors.New("model-gen: 'schema' field must be set when 'driver' field is set to 'postgres'")
+	ErrQueryTableNames  = errors.New("query table name error")
+	ErrQueryColumnNames = errors.New("query column name error")
+	ErrQueryForeignKeys = errors.New("query foreign key error")
+)
+
+type GenExecutor interface {
+	Execute()
+	ApplyBasic(...interface{})
+	GenerateModel(string, ...gen.ModelOpt) interface{}
+}
 
 type foreignKey struct {
 	ColumnName       string
 	ForeignTableName string
 }
 
-func GenerateModels(cfg GenerateModelConfig) {
+func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema string) error {
 	var err error
 	var tableNames []string
-	var gormDB *gorm.DB
 
-	g := gen.NewGenerator(gen.Config{
-		FieldNullable:     cfg.FieldNullable,
-		FieldCoverable:    cfg.FieldCoverable,
-		FieldSignable:     cfg.FieldSignable,
-		FieldWithIndexTag: cfg.FieldWithIndexTag,
-		FieldWithTypeTag:  cfg.FieldWithTypeTag,
-		OutFile:           cfg.OutFile,
-		OutPath:           cfg.QueryOutPath,
-		ModelPkgPath:      cfg.ModelOutPath,
-	})
-
-	switch cfg.Driver {
-	case PostgresDriver:
-		gormDB, err = gorm.Open(postgres.Open(cfg.URL))
-	case MysqlDriver:
-		gormDB, err = gorm.Open(mysql.Open(cfg.URL))
-	case SqliteDriver:
-		gormDB, err = gorm.Open(sqlite.Open(cfg.URL))
+	if driver == PostgresDriver && schema == "" {
+		return ErrMustSetSchema
 	}
-
-	if err != nil {
-		log.Fatalf("model-gen: init db err: %s\n", err.Error())
-	}
-
-	g.UseDB(gormDB)
 
 	if err = gormDB.Raw(
-		getTableNamesQuery(cfg.Driver, cfg.Schema),
+		getTableNamesQuery(driver, schema),
 	).Scan(&tableNames).Error; err != nil {
-		log.Fatalf("model-gen: query table name err: %s\n", err.Error())
+		return fmt.Errorf(packageErr, ErrQueryTableNames, err.Error())
 	}
 
 	for _, tableName := range tableNames {
@@ -60,9 +56,9 @@ func GenerateModels(cfg GenerateModelConfig) {
 		var cols []string
 
 		if err = gormDB.Raw(
-			getColumnNameQuery(cfg.Driver, cfg.Schema, tableName),
+			getColumnNameQuery(driver, schema, tableName),
 		).Scan(&cols).Error; err != nil {
-			log.Fatalf("column query error: %+v\n", err)
+			return fmt.Errorf(packageErr, ErrQueryColumnNames, err.Error())
 		}
 
 		for _, col := range cols {
@@ -70,21 +66,26 @@ func GenerateModels(cfg GenerateModelConfig) {
 		}
 
 		if err = gormDB.Raw(
-			getForeignKeyQuery(cfg.Driver, cfg.Schema, tableName),
+			getForeignKeyQuery(driver, schema, tableName),
 		).Scan(&fks).Error; err != nil {
-			log.Fatalf("foreign key error: %+v\n", err)
+			return fmt.Errorf(packageErr, ErrQueryForeignKeys, err.Error())
 		}
 
 		for _, fk := range fks {
 			columnName := fk.ColumnName[:len(fk.ColumnName)-3]
 			fieldName := snaker.SnakeToCamel(columnName)
-			opts = append(opts, gen.FieldNew(fieldName, "*"+snaker.SnakeToCamel(fk.ForeignTableName), `db:"`+columnName+`"`))
+			opts = append(opts, gen.FieldNew(
+				fieldName,
+				"*"+snaker.SnakeToCamel(fk.ForeignTableName),
+				`db:"`+columnName+`" json:"`+columnName+`"`),
+			)
 		}
 
 		g.ApplyBasic(g.GenerateModel(tableName, opts...))
 	}
 
 	g.Execute()
+	return nil
 }
 
 func getTableNamesQuery(driver DBDriver, schema string) string {

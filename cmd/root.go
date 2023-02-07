@@ -22,25 +22,16 @@ import (
 
 	"github.com/TravisS25/model-gen/app"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/objx"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gen"
+	"gorm.io/gorm"
 
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/viper"
 )
-
-type generateModelCmdConfig struct {
-	Driver flagName
-	URL    flagName
-
-	FieldNullable     flagName
-	FieldCoverable    flagName
-	FieldSignable     flagName
-	FieldWithIndexTag flagName
-	FieldWithTypeTag  flagName
-	OutFile           flagName
-	QueryOutPath      flagName
-	ModelOutPath      flagName
-	Schema            flagName
-}
 
 var (
 	errRequiredRootFields       = errors.New("model-gen: --driver and --url flags are required if config file is not used")
@@ -89,6 +80,29 @@ var generateModelCmdCfg = generateModelCmdConfig{
 	},
 }
 
+type generateModelCmdConfig struct {
+	Driver flagName
+	URL    flagName
+
+	FieldNullable     flagName
+	FieldCoverable    flagName
+	FieldSignable     flagName
+	FieldWithIndexTag flagName
+	FieldWithTypeTag  flagName
+	OutFile           flagName
+	QueryOutPath      flagName
+	ModelOutPath      flagName
+	Schema            flagName
+}
+
+type generator struct {
+	*gen.Generator
+}
+
+func (g *generator) GenerateModel(model string, opts ...gen.ModelOpt) interface{} {
+	return g.Generator.GenerateModel(model, opts...)
+}
+
 var cfgFile string
 
 // rootCmd represents the base command when called without any subcommands
@@ -113,10 +127,93 @@ to quickly create a Cobra application.`,
 		return rootCmdPreRunValidation(app.DBDriver(driver), url, schema)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("root_cmd config: %+v\n", viper.Get("root_cmd"))
+		var cfg gen.Config
+		var url, driver, schema string
+		var gormDB *gorm.DB
+		var err error
 
-		return nil
+		if err = viper.ReadInConfig(); err == nil {
+			rootCmd := objx.New(viper.Get("root_cmd").(map[string]interface{}))
+			url = rootCmd.Get("url").Str()
+			driver = rootCmd.Get("driver").Str()
+			schema = rootCmd.Get("schema").Str()
+
+			cfg = gen.Config{
+				FieldNullable:     rootCmd.Get("field_nullable").Bool(),
+				FieldCoverable:    rootCmd.Get("field_coverable").Bool(),
+				FieldSignable:     rootCmd.Get("field_signable").Bool(),
+				FieldWithIndexTag: rootCmd.Get("field_with_index_tag").Bool(),
+				FieldWithTypeTag:  rootCmd.Get("field_with_type_tag").Bool(),
+				OutFile:           rootCmd.Get("out_file").Str(),
+				OutPath:           rootCmd.Get("query_out_path").Str(),
+				ModelPkgPath:      rootCmd.Get("model_out_path").Str(),
+			}
+		} else {
+			driver, _ = cmd.Flags().GetString(generateModelCmdCfg.Driver.LongHand)
+			url, _ = cmd.Flags().GetString(generateModelCmdCfg.URL.LongHand)
+			schema, _ = cmd.Flags().GetString(generateModelCmdCfg.Schema.LongHand)
+
+			fieldNullable, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldNullable.LongHand)
+			fieldCoverable, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldCoverable.LongHand)
+			fieldSignable, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldSignable.LongHand)
+			fieldWithIndexTag, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldWithIndexTag.LongHand)
+			fieldWithTypeTag, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldWithTypeTag.LongHand)
+			outFile, _ := cmd.Flags().GetString(generateModelCmdCfg.OutFile.LongHand)
+			queryOutPath, _ := cmd.Flags().GetString(generateModelCmdCfg.QueryOutPath.LongHand)
+			modelOutPath, _ := cmd.Flags().GetString(generateModelCmdCfg.ModelOutPath.LongHand)
+
+			cfg = gen.Config{
+				FieldNullable:     fieldNullable,
+				FieldCoverable:    fieldCoverable,
+				FieldSignable:     fieldSignable,
+				FieldWithIndexTag: fieldWithIndexTag,
+				FieldWithTypeTag:  fieldWithTypeTag,
+				OutFile:           outFile,
+				OutPath:           queryOutPath,
+				ModelPkgPath:      modelOutPath,
+			}
+		}
+
+		switch app.DBDriver(driver) {
+		case app.PostgresDriver:
+			gormDB, err = gorm.Open(postgres.Open(url))
+		case app.MysqlDriver:
+			gormDB, err = gorm.Open(mysql.Open(url))
+		default:
+			gormDB, err = gorm.Open(sqlite.Open(url))
+		}
+
+		if err != nil {
+			return fmt.Errorf("model-gen: init db err: %s\n", err.Error())
+		}
+
+		g := gen.NewGenerator(cfg)
+		g.UseDB(gormDB)
+
+		newG := &generator{Generator: g}
+
+		return app.GenerateModels(newG, gormDB, app.DBDriver(driver), schema)
 	},
+}
+
+func getDBFromDriver(driver app.DBDriver, url string) (*gorm.DB, error) {
+	var gormDB *gorm.DB
+	var err error
+
+	switch app.DBDriver(driver) {
+	case app.PostgresDriver:
+		gormDB, err = gorm.Open(postgres.Open(url))
+	case app.MysqlDriver:
+		gormDB, err = gorm.Open(mysql.Open(url))
+	default:
+		gormDB, err = gorm.Open(sqlite.Open(url))
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("model-gen: init db err: %s\n", err.Error())
+	}
+
+	return gormDB, err
 }
 
 func rootCmdPreRunValidation(driver app.DBDriver, url, schema string) error {
@@ -190,7 +287,7 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.modelgen.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.model_gen.yaml)")
 	rootCmd.PersistentFlags().String(
 		generateModelCmdCfg.Driver.LongHand,
 		"",
@@ -234,12 +331,12 @@ func init() {
 	rootCmd.PersistentFlags().String(
 		generateModelCmdCfg.QueryOutPath.LongHand,
 		"",
-		"Path the query code will be generated to.  Can be relative path of where program is executed",
+		"Path the query code will be generated to.  Can be relative path of where model-gen is executed",
 	)
 	rootCmd.PersistentFlags().String(
 		generateModelCmdCfg.ModelOutPath.LongHand,
 		"",
-		"Path the model code will be generated to.  Can be relative path of where program is executed",
+		"Path the model code will be generated to.  Can be relative path of where model-gen is executed",
 	)
 	rootCmd.PersistentFlags().String(
 		generateModelCmdCfg.Schema.LongHand,
