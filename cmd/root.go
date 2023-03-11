@@ -78,6 +78,18 @@ var generateModelCmdCfg = generateModelCmdConfig{
 	Schema: flagName{
 		LongHand: "schema",
 	},
+	ConvertTimestamp: flagName{
+		LongHand: "convert-timestamp",
+	},
+	ConvertDate: flagName{
+		LongHand: "convert-date",
+	},
+	convertBigint: flagName{
+		LongHand: "convert-bigint",
+	},
+	convertUUID: flagName{
+		LongHand: "convert-uuid",
+	},
 }
 
 type generateModelCmdConfig struct {
@@ -93,6 +105,10 @@ type generateModelCmdConfig struct {
 	QueryOutPath      flagName
 	ModelOutPath      flagName
 	Schema            flagName
+	ConvertTimestamp  flagName
+	ConvertDate       flagName
+	convertBigint     flagName
+	convertUUID       flagName
 }
 
 type generator struct {
@@ -131,12 +147,17 @@ to quickly create a Cobra application.`,
 		var url, driver, schema string
 		var gormDB *gorm.DB
 		var err error
+		var convertTimestamp, convertDate, convertBigint, convertUUID string
 
 		if err = viper.ReadInConfig(); err == nil {
 			rootCmd := objx.New(viper.Get("root_cmd").(map[string]interface{}))
 			url = rootCmd.Get("url").Str()
 			driver = rootCmd.Get("driver").Str()
 			schema = rootCmd.Get("schema").Str()
+			convertTimestamp = rootCmd.Get("convert_timestamp").Str()
+			convertDate = rootCmd.Get("convert_date").Str()
+			convertBigint = rootCmd.Get("convert_bigint").Str()
+			convertUUID = rootCmd.Get("convert_uuid").Str()
 
 			cfg = gen.Config{
 				FieldNullable:     rootCmd.Get("field_nullable").Bool(),
@@ -161,6 +182,10 @@ to quickly create a Cobra application.`,
 			outFile, _ := cmd.Flags().GetString(generateModelCmdCfg.OutFile.LongHand)
 			queryOutPath, _ := cmd.Flags().GetString(generateModelCmdCfg.QueryOutPath.LongHand)
 			modelOutPath, _ := cmd.Flags().GetString(generateModelCmdCfg.ModelOutPath.LongHand)
+			convertTimestamp, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertTimestamp.LongHand)
+			convertDate, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertDate.LongHand)
+			convertBigint, _ = cmd.Flags().GetString(generateModelCmdCfg.convertBigint.LongHand)
+			convertUUID, _ = cmd.Flags().GetString(generateModelCmdCfg.convertUUID.LongHand)
 
 			cfg = gen.Config{
 				FieldNullable:     fieldNullable,
@@ -189,6 +214,31 @@ to quickly create a Cobra application.`,
 
 		g := gen.NewGenerator(cfg)
 		g.UseDB(gormDB)
+
+		dataMap := map[string]func(detailType string) (dataType string){}
+
+		if convertTimestamp != "" {
+			dataMap["timestamptz"] = func(detailType string) (dataType string) {
+				return convertTimestamp
+			}
+		}
+		if convertDate != "" {
+			dataMap["date"] = func(detailType string) (dataType string) {
+				return convertDate
+			}
+		}
+		if convertBigint != "" {
+			dataMap["int8"] = func(detailType string) (dataType string) {
+				return convertBigint
+			}
+		}
+		if convertUUID != "" {
+			dataMap["uuid"] = func(detailType string) (dataType string) {
+				return convertUUID
+			}
+		}
+
+		g.WithDataTypeMap(dataMap)
 
 		newG := &generator{Generator: g}
 
@@ -342,6 +392,11 @@ func init() {
 		generateModelCmdCfg.Schema.LongHand,
 		"",
 		"Schema to base model generation off.  Required if driver is 'postgres'",
+	)
+	rootCmd.PersistentFlags().String(
+		generateModelCmdCfg.ConvertTimestamp.LongHand,
+		"",
+		"Converts any db fields with timestamp data type to one entered",
 	)
 
 	rootCmd.MarkFlagRequired(generateModelCmdCfg.Driver.LongHand)

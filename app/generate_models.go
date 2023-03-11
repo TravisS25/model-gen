@@ -36,6 +36,11 @@ type foreignKey struct {
 	ForeignTableName string
 }
 
+type tableColumn struct {
+	ColumnName string
+	DataType   string
+}
+
 func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema string) error {
 	var err error
 	var tableNames []string
@@ -50,10 +55,12 @@ func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema stri
 		return fmt.Errorf(packageErr, ErrQueryTableNames, err.Error())
 	}
 
+	//bi := "bigint"
+
 	for _, tableName := range tableNames {
 		var fks []foreignKey
 		var opts []gen.ModelOpt
-		var cols []string
+		var cols []tableColumn
 
 		if err = gormDB.Raw(
 			getColumnNameQuery(driver, schema, tableName),
@@ -62,7 +69,24 @@ func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema stri
 		}
 
 		for _, col := range cols {
-			opts = append(opts, gen.FieldNewTag(col, `db:"`+col+`"`))
+			opts = append(
+				opts,
+				gen.FieldNewTag(col.ColumnName, `db:"`+col.ColumnName+`"`),
+				gen.FieldJSONTag(col.ColumnName, snaker.ForceLowerCamelIdentifier(col.ColumnName)),
+				// gen.FieldJSONTagWithNS(func(columnName string) (tagContent string) {
+				// 	jsonField := snaker.ForceLowerCamelIdentifier(columnName)
+
+				// 	if col.DataType == bi {
+				// 		jsonField += ",string"
+				// 	}
+
+				// 	return jsonField
+				// }),
+			)
+
+			// if col.DataType == bi {
+			// 	opts = append(opts, gen.FieldGenType(col.ColumnName, "json.Number"))
+			// }
 		}
 
 		if err = gormDB.Raw(
@@ -74,10 +98,13 @@ func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema stri
 		for _, fk := range fks {
 			columnName := fk.ColumnName[:len(fk.ColumnName)-3]
 			fieldName := snaker.SnakeToCamel(columnName)
-			opts = append(opts, gen.FieldNew(
-				fieldName,
-				"*"+snaker.SnakeToCamel(fk.ForeignTableName),
-				`db:"`+columnName+`" json:"`+columnName+`"`),
+			opts = append(
+				opts,
+				gen.FieldNew(
+					fieldName,
+					"*"+snaker.SnakeToCamel(fk.ForeignTableName),
+					`db:"`+columnName+`" json:"`+snaker.ForceLowerCamelIdentifier(columnName)+`"`,
+				),
 			)
 		}
 
@@ -184,7 +211,8 @@ func getColumnNameQuery(driver DBDriver, schema, tableName string) string {
 		return fmt.Sprintf(
 			`
 			select
-				column_name
+				column_name,
+				data_type
 			from
 				information_schema.columns
 			where
@@ -199,7 +227,8 @@ func getColumnNameQuery(driver DBDriver, schema, tableName string) string {
 		return fmt.Sprintf(
 			`
 			select
-				column_name
+				column_name,
+				data_type
 			from
 				information_schema.columns
 			where
@@ -211,7 +240,8 @@ func getColumnNameQuery(driver DBDriver, schema, tableName string) string {
 		return fmt.Sprintf(
 			`
 			select
-				name
+				name,
+				data_type
 			from
 				pragma_table_info('%s');
 			`,
