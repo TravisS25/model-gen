@@ -16,11 +16,11 @@ limitations under the License.
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 
 	"github.com/TravisS25/model-gen/app"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/objx"
 	"gorm.io/driver/mysql"
@@ -36,6 +36,7 @@ import (
 var (
 	errRequiredRootFields       = errors.New("model-gen: --driver and --url flags are required if config file is not used")
 	errInvalidDriver            = errors.New("model-gen: must choose valid --driver.  Options are 'postgres', 'mysql', 'sqlite'")
+	errInvalidLanguageType      = errors.New("model-gen: invalid language type")
 	errMustSetSchema            = errors.New("model-gen: --schema flag must be set when --driver is set to 'postgres'")
 	errRootKeyNotSet            = errors.New("model-gen: root_cmd key in config file must be set")
 	errRootKeyDictionary        = errors.New("model-gen: root_cmd key must be dictionary type")
@@ -84,33 +85,55 @@ var generateModelCmdCfg = generateModelCmdConfig{
 	ConvertDate: flagName{
 		LongHand: "convert-date",
 	},
-	convertBigint: flagName{
+	ConvertBigint: flagName{
 		LongHand: "convert-bigint",
 	},
-	convertUUID: flagName{
+	ConvertUUID: flagName{
 		LongHand: "convert-uuid",
 	},
+	LanguageType: flagName{
+		LongHand: "language-type",
+	},
+	RemoveGeneratedDirs: flagName{
+		LongHand: "remove-generated-dirs",
+	},
+}
+
+var languageTypes = map[string]bool{
+	"go": true,
+	"ts": true,
 }
 
 type generateModelCmdConfig struct {
 	Driver flagName
 	URL    flagName
 
-	FieldNullable     flagName
-	FieldCoverable    flagName
-	FieldSignable     flagName
-	FieldWithIndexTag flagName
-	FieldWithTypeTag  flagName
-	OutFile           flagName
-	QueryOutPath      flagName
-	ModelOutPath      flagName
-	Schema            flagName
-	ConvertTimestamp  flagName
-	ConvertDate       flagName
-	convertBigint     flagName
-	convertUUID       flagName
+	FieldNullable       flagName
+	FieldCoverable      flagName
+	FieldSignable       flagName
+	FieldWithIndexTag   flagName
+	FieldWithTypeTag    flagName
+	OutFile             flagName
+	QueryOutPath        flagName
+	ModelOutPath        flagName
+	Schema              flagName
+	ConvertTimestamp    flagName
+	ConvertDate         flagName
+	ConvertBigint       flagName
+	ConvertUUID         flagName
+	LanguageType        flagName
+	RemoveGeneratedDirs flagName
 }
 
+// generator is a "wrapper" struct used to simply override the "GenerateModel" function
+// from the gen.Generator struct
+//
+// Reason for this is that "GenerateModel" function returns type *generate.QueryStructMeta
+// which lives within the "internal" folder of the library meaning users can't
+// actually call it so it makes mocking for tests impossible
+//
+// So this struct wraps the *gen.Generator and overrides the "GenerateModel" function
+// and returns interface{}
 type generator struct {
 	*gen.Generator
 }
@@ -139,15 +162,25 @@ to quickly create a Cobra application.`,
 		driver, _ := cmd.Flags().GetString(generateModelCmdCfg.Driver.LongHand)
 		url, _ := cmd.Flags().GetString(generateModelCmdCfg.URL.LongHand)
 		schema, _ := cmd.Flags().GetString(generateModelCmdCfg.Schema.LongHand)
+		lt, _ := cmd.Flags().GetString(generateModelCmdCfg.LanguageType.LongHand)
+
+		if lt != "" {
+			_, ok := languageTypes[lt]
+
+			if !ok {
+				return errInvalidLanguageType
+			}
+		}
 
 		return rootCmdPreRunValidation(app.DBDriver(driver), url, schema)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var cfg gen.Config
-		var url, driver, schema string
 		var gormDB *gorm.DB
 		var err error
-		var convertTimestamp, convertDate, convertBigint, convertUUID string
+		var removeGenDirs bool
+		var url, driver, schema, convertTimestamp, convertDate, convertBigint,
+			convertUUID, lt string
 
 		if err = viper.ReadInConfig(); err == nil {
 			rootCmd := objx.New(viper.Get("root_cmd").(map[string]interface{}))
@@ -158,6 +191,8 @@ to quickly create a Cobra application.`,
 			convertDate = rootCmd.Get("convert_date").Str()
 			convertBigint = rootCmd.Get("convert_bigint").Str()
 			convertUUID = rootCmd.Get("convert_uuid").Str()
+			lt = rootCmd.Get("language_type").Str()
+			removeGenDirs = rootCmd.Get("remove_generated_dirs").Bool()
 
 			cfg = gen.Config{
 				FieldNullable:     rootCmd.Get("field_nullable").Bool(),
@@ -184,8 +219,10 @@ to quickly create a Cobra application.`,
 			modelOutPath, _ := cmd.Flags().GetString(generateModelCmdCfg.ModelOutPath.LongHand)
 			convertTimestamp, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertTimestamp.LongHand)
 			convertDate, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertDate.LongHand)
-			convertBigint, _ = cmd.Flags().GetString(generateModelCmdCfg.convertBigint.LongHand)
-			convertUUID, _ = cmd.Flags().GetString(generateModelCmdCfg.convertUUID.LongHand)
+			convertBigint, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertBigint.LongHand)
+			convertUUID, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertUUID.LongHand)
+			lt, _ = cmd.Flags().GetString(generateModelCmdCfg.LanguageType.LongHand)
+			removeGenDirs, _ = cmd.Flags().GetBool(generateModelCmdCfg.RemoveGeneratedDirs.LongHand)
 
 			cfg = gen.Config{
 				FieldNullable:     fieldNullable,
@@ -217,6 +254,7 @@ to quickly create a Cobra application.`,
 
 		dataMap := map[string]func(detailType string) (dataType string){}
 
+		// Convert any types given from cli or file to desired types
 		if convertTimestamp != "" {
 			dataMap["timestamptz"] = func(detailType string) (dataType string) {
 				return convertTimestamp
@@ -240,9 +278,22 @@ to quickly create a Cobra application.`,
 
 		g.WithDataTypeMap(dataMap)
 
-		newG := &generator{Generator: g}
+		fmt.Printf("%s", lt)
 
-		return app.GenerateModels(newG, gormDB, app.DBDriver(driver), schema)
+		if err = app.GenerateModels(
+			&generator{Generator: g},
+			gormDB,
+			app.DBDriver(driver),
+			schema,
+		); err != nil {
+			return errors.WithStack(err)
+		}
+
+		if lt != "" && lt != "go" && removeGenDirs {
+
+		}
+
+		return nil
 	},
 }
 
@@ -397,6 +448,17 @@ func init() {
 		generateModelCmdCfg.ConvertTimestamp.LongHand,
 		"",
 		"Converts any db fields with timestamp data type to one entered",
+	)
+	rootCmd.PersistentFlags().String(
+		generateModelCmdCfg.LanguageType.LongHand,
+		"go",
+		`Determines what language file type the models are output to.  Available options are: "go", "ts"`,
+	)
+	rootCmd.PersistentFlags().Bool(
+		generateModelCmdCfg.RemoveGeneratedDirs.LongHand,
+		false,
+		`If --language-type option is anything but "go", this option will allow cleanup of the generated go
+		files that are created when converting from go to whatever language selected`,
 	)
 
 	rootCmd.MarkFlagRequired(generateModelCmdCfg.Driver.LongHand)

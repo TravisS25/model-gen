@@ -20,9 +20,9 @@ var (
 	})
 
 	ErrMustSetSchema    = errors.New("model-gen: 'schema' field must be set when 'driver' field is set to 'postgres'")
-	ErrQueryTableNames  = errors.New("query table name error")
-	ErrQueryColumnNames = errors.New("query column name error")
-	ErrQueryForeignKeys = errors.New("query foreign key error")
+	ErrQueryTableNames  = errors.New("model-gen: query table name error")
+	ErrQueryColumnNames = errors.New("model-gen: query column name error")
+	ErrQueryForeignKeys = errors.New("model-gen: query foreign key error")
 )
 
 type GenExecutor interface {
@@ -55,8 +55,6 @@ func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema stri
 		return fmt.Errorf(packageErr, ErrQueryTableNames, err.Error())
 	}
 
-	//bi := "bigint"
-
 	for _, tableName := range tableNames {
 		var fks []foreignKey
 		var opts []gen.ModelOpt
@@ -73,20 +71,7 @@ func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema stri
 				opts,
 				gen.FieldNewTag(col.ColumnName, `db:"`+col.ColumnName+`"`),
 				gen.FieldJSONTag(col.ColumnName, snaker.ForceLowerCamelIdentifier(col.ColumnName)),
-				// gen.FieldJSONTagWithNS(func(columnName string) (tagContent string) {
-				// 	jsonField := snaker.ForceLowerCamelIdentifier(columnName)
-
-				// 	if col.DataType == bi {
-				// 		jsonField += ",string"
-				// 	}
-
-				// 	return jsonField
-				// }),
 			)
-
-			// if col.DataType == bi {
-			// 	opts = append(opts, gen.FieldGenType(col.ColumnName, "json.Number"))
-			// }
 		}
 
 		if err = gormDB.Raw(
@@ -113,6 +98,10 @@ func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema stri
 
 	g.Execute()
 	return nil
+}
+
+func RemoveGoDirectories(queryPath string, modelPath string) {
+
 }
 
 func getTableNamesQuery(driver DBDriver, schema string) string {
