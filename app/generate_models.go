@@ -1,8 +1,17 @@
 package app
 
 import (
-	"errors"
+	"bufio"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"unicode"
+
+	"github.com/pkg/errors"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/kenshaw/snaker"
@@ -29,6 +38,11 @@ type GenExecutor interface {
 	Execute()
 	ApplyBasic(...interface{})
 	GenerateModel(string, ...gen.ModelOpt) interface{}
+}
+
+type GenerateConfig struct {
+	OutFile    string
+	SingleFile string
 }
 
 type foreignKey struct {
@@ -100,8 +114,167 @@ func GenerateModels(g GenExecutor, gormDB *gorm.DB, driver DBDriver, schema stri
 	return nil
 }
 
-func RemoveGoDirectories(queryPath string, modelPath string) {
+func GenerateTsModels(goModelDir, goOutFile, tsDir, tsFile, tsOutFile string, cfg GenerateConfig) error {
+	if tsDir == "" {
+		return errors.WithStack(fmt.Errorf("model-gen: tsDir parameter can't be empty"))
+	}
+	if tsFile == "" {
+		return errors.WithStack(fmt.Errorf("model-gen: tsFile parameter can't be empty"))
+	}
+	if tsOutFile == "" {
+		return errors.WithStack(fmt.Errorf("model-gen: tsOutFile parameter can't be empty"))
+	}
 
+	strConv := []string{
+		"Int64",
+		"int64",
+		"float64",
+		"string",
+	}
+
+	numConv := []string{
+		"int8",
+		"int16",
+		"int",
+		"int32",
+		"float32",
+	}
+
+	space := regexp.MustCompile(`\s+`)
+
+	var err error
+
+	if err = os.MkdirAll(tsDir, os.ModePerm); err != nil {
+		return errors.WithStack(err)
+	}
+
+	newFile, err := os.Create(filepath.Join(tsDir, tsFile) + "." + tsOutFile)
+
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	defer newFile.Close()
+
+	return filepath.Walk(goModelDir, func(path string, info fs.FileInfo, err error) error {
+		if !info.IsDir() {
+			if !strings.HasSuffix(info.Name(), goOutFile) {
+				return nil
+			}
+
+			openFile, err := os.Open(path)
+
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			defer openFile.Close()
+
+			newFileWriter := bufio.NewWriter(newFile)
+			openFileReader := bufio.NewReader(openFile)
+
+			withinStruct := false
+
+			for {
+				l, err := openFileReader.ReadString('\n')
+
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+
+					return errors.WithStack(err)
+				}
+
+				ajustedLine := strings.TrimSpace(space.ReplaceAllString(l, " "))
+
+				if strings.Contains(ajustedLine, " struct {") {
+					structArr := strings.Split(ajustedLine, " ")
+					newFileWriter.WriteString(fmt.Sprintf("export interface %s {\n", structArr[1]))
+					withinStruct = true
+					continue
+				}
+
+				if strings.TrimSpace(ajustedLine) == "}" && withinStruct {
+					newFileWriter.WriteString("}\n\n")
+					break
+				}
+
+				if withinStruct {
+					lineArr := strings.Split(ajustedLine, " ")
+
+					var fieldType, fieldName string
+
+					if snaker.IsInitialism(lineArr[0]) {
+						fieldName = strings.ToLower(lineArr[0])
+					} else {
+						fn := []rune(lineArr[0])
+						fn[0] = unicode.ToLower(fn[0])
+						fieldName = string(fn)
+					}
+
+					if lineArr[1][0] == '*' {
+						fieldType = lineArr[1][1:len(lineArr[1])]
+					}
+
+					for _, v := range strConv {
+						if strings.Contains(lineArr[1], v) {
+							//fmt.Printf("string type: %s\n conv type: %s\n", lineArr[1], v)
+							fieldType = "string"
+						}
+					}
+
+					for _, v := range numConv {
+						if strings.Contains(lineArr[1], v) {
+							fieldType = "number"
+						}
+					}
+
+					if lineArr[1] == "bool" || lineArr[1] == "*bool" {
+						fieldType = "boolean"
+					}
+
+					//fmt.Printf("field type gettign hheeeeeer: %s\n", fieldType)
+
+					if fieldType == "" {
+						fieldType = lineArr[1]
+					}
+
+					newLine := fmt.Sprintf("\t%s?: %s\n", fieldName, fieldType)
+
+					if _, err = newFileWriter.WriteString(newLine); err != nil {
+						return errors.WithStack(err)
+					}
+				}
+			}
+
+			if err = newFileWriter.Flush(); err != nil {
+				return errors.WithStack(err)
+			}
+		}
+
+		return nil
+	})
+}
+
+func RemoveGenDirs(queryOutPath, modelOutPath string) error {
+	var err error
+
+	if queryOutPath == "" {
+		queryOutPath = "./query"
+	}
+	if modelOutPath == "" {
+		modelOutPath = "./model"
+	}
+
+	if err = os.RemoveAll(queryOutPath); err != nil {
+		return errors.WithStack(err)
+	}
+	if err = os.RemoveAll(modelOutPath); err != nil {
+		return errors.WithStack(err)
+	}
+
+	return nil
 }
 
 func getTableNamesQuery(driver DBDriver, schema string) string {

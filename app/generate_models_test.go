@@ -116,3 +116,20 @@ func TestGenerateModels(t *testing.T) {
 	}
 
 }
+
+func TestGenerateTsModels(t *testing.T) {
+	var err error
+
+	if err = GenerateTsModels(
+		"/home/travis/programming/projects/pac-env/app/server/model/",
+		"gen.go",
+		"/home/travis/programming/projects/pac-env/app/web/src/",
+		"model",
+		"gen.ts",
+		GenerateConfig{},
+	); err != nil {
+		t.Fatalf(err.Error())
+	}
+
+	t.Fatalf("boom")
+}

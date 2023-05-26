@@ -34,15 +34,12 @@ import (
 )
 
 var (
-	errRequiredRootFields       = errors.New("model-gen: --driver and --url flags are required if config file is not used")
-	errInvalidDriver            = errors.New("model-gen: must choose valid --driver.  Options are 'postgres', 'mysql', 'sqlite'")
-	errInvalidLanguageType      = errors.New("model-gen: invalid language type")
-	errMustSetSchema            = errors.New("model-gen: --schema flag must be set when --driver is set to 'postgres'")
-	errRootKeyNotSet            = errors.New("model-gen: root_cmd key in config file must be set")
-	errRootKeyDictionary        = errors.New("model-gen: root_cmd key must be dictionary type")
-	errRequiredRootFieldsConfig = errors.New("model-gen: fields 'driver' and 'url' must be set under 'root_cmd' key")
-	errInvalidDriverConfig      = errors.New("model-gen: must choose valid driver field under 'root_cmd' key.  Options are 'postgres', 'mysql', 'sqlite'")
-	errMustSetSchemaConfig      = errors.New("model-gen: 'schema' field must be set when 'driver' field is set to 'postgres'")
+	errRequiredRootFields    = errors.New("model-gen: --driver and --url flags are required if config file is not used")
+	errInvalidDriver         = errors.New("model-gen: must choose valid --driver.  Options are 'postgres', 'mysql', 'sqlite'")
+	errMustSetSchema         = errors.New("model-gen: --schema flag must be set when --driver is set to 'postgres'")
+	errRootKeyNotSet         = errors.New("model-gen: root_cmd key in config file must be set")
+	errRootKeyDictionary     = errors.New("model-gen: root_cmd key must be dictionary type")
+	errInvalidTsFileSettings = errors.New("model-gen: --ts-dir and --ts-file must be set together")
 )
 
 var generateModelCmdCfg = generateModelCmdConfig{
@@ -97,11 +94,44 @@ var generateModelCmdCfg = generateModelCmdConfig{
 	RemoveGeneratedDirs: flagName{
 		LongHand: "remove-generated-dirs",
 	},
+	TsDir: flagName{
+		LongHand: "ts-dir",
+	},
+	TsFile: flagName{
+		LongHand: "ts-file",
+	},
+	TsOutFile: flagName{
+		LongHand: "ts-out-file",
+	},
 }
 
-var languageTypes = map[string]bool{
-	"go": true,
-	"ts": true,
+var languageTypeMap = map[app.LanguageType]bool{
+	app.GoLanguageType: true,
+	app.TsLanguageType: true,
+}
+
+var dbDriverMap = map[app.DBDriver]bool{
+	app.PostgresDriver: true,
+	app.MysqlDriver:    true,
+	app.SqliteDriver:   true,
+}
+
+type rootViperConfig struct {
+	dir  string
+	file string
+}
+
+type rootCliConfig struct {
+	driver app.DBDriver
+	url    string
+	schema string
+	tsDir  string
+	tsFile string
+}
+
+type rootValidationConfig struct {
+	configFile string
+	cli        rootCliConfig
 }
 
 type generateModelCmdConfig struct {
@@ -123,6 +153,9 @@ type generateModelCmdConfig struct {
 	ConvertUUID         flagName
 	LanguageType        flagName
 	RemoveGeneratedDirs flagName
+	TsDir               flagName
+	TsFile              flagName
+	TsOutFile           flagName
 }
 
 // generator is a "wrapper" struct used to simply override the "GenerateModel" function
@@ -162,78 +195,143 @@ to quickly create a Cobra application.`,
 		driver, _ := cmd.Flags().GetString(generateModelCmdCfg.Driver.LongHand)
 		url, _ := cmd.Flags().GetString(generateModelCmdCfg.URL.LongHand)
 		schema, _ := cmd.Flags().GetString(generateModelCmdCfg.Schema.LongHand)
-		lt, _ := cmd.Flags().GetString(generateModelCmdCfg.LanguageType.LongHand)
+		tsDir, _ := cmd.Flags().GetString(generateModelCmdCfg.Schema.LongHand)
+		tsFile, _ := cmd.Flags().GetString(generateModelCmdCfg.Schema.LongHand)
 
-		if lt != "" {
-			_, ok := languageTypes[lt]
-
-			if !ok {
-				return errInvalidLanguageType
-			}
-		}
-
-		return rootCmdPreRunValidation(app.DBDriver(driver), url, schema)
+		return rootCmdPreRunValidation(rootValidationConfig{
+			cli: rootCliConfig{
+				driver: app.DBDriver(driver),
+				url:    url,
+				schema: schema,
+				tsDir:  tsDir,
+				tsFile: tsFile,
+			},
+		})
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var cfg gen.Config
 		var gormDB *gorm.DB
 		var err error
-		var removeGenDirs bool
+		var removeGenDirs, fieldNullable, fieldCoverable, fieldSignable, fieldWithIndexTag,
+			fieldWithTypeTag bool
 		var url, driver, schema, convertTimestamp, convertDate, convertBigint,
-			convertUUID, lt string
+			convertUUID, outFile, queryOutPath string
+		var modelOutPath, tsDir, tsFile, tsOutFile string
 
 		if err = viper.ReadInConfig(); err == nil {
 			rootCmd := objx.New(viper.Get("root_cmd").(map[string]interface{}))
-			url = rootCmd.Get("url").Str()
+
+			fieldNullable = rootCmd.Get("field_nullable").Bool()
+			fieldCoverable = rootCmd.Get("field_coverable").Bool()
+			fieldSignable = rootCmd.Get("field_signable").Bool()
+			fieldWithIndexTag = rootCmd.Get("field_with_index_tag").Bool()
+			fieldWithTypeTag = rootCmd.Get("field_with_type_tag").Bool()
+			removeGenDirs = rootCmd.Get("remove_generated_dirs").Bool()
+
 			driver = rootCmd.Get("driver").Str()
+			url = rootCmd.Get("url").Str()
 			schema = rootCmd.Get("schema").Str()
+			outFile = rootCmd.Get("out_file").Str()
+			queryOutPath = rootCmd.Get("query_out_path").Str()
+			modelOutPath = rootCmd.Get("model_out_path").Str()
 			convertTimestamp = rootCmd.Get("convert_timestamp").Str()
 			convertDate = rootCmd.Get("convert_date").Str()
 			convertBigint = rootCmd.Get("convert_bigint").Str()
 			convertUUID = rootCmd.Get("convert_uuid").Str()
-			lt = rootCmd.Get("language_type").Str()
-			removeGenDirs = rootCmd.Get("remove_generated_dirs").Bool()
+			tsDir = rootCmd.Get("ts_dir").Str()
+			tsFile = rootCmd.Get("ts_file").Str()
+			tsOutFile = rootCmd.Get("ts_out_file").Str()
+		}
 
-			cfg = gen.Config{
-				FieldNullable:     rootCmd.Get("field_nullable").Bool(),
-				FieldCoverable:    rootCmd.Get("field_coverable").Bool(),
-				FieldSignable:     rootCmd.Get("field_signable").Bool(),
-				FieldWithIndexTag: rootCmd.Get("field_with_index_tag").Bool(),
-				FieldWithTypeTag:  rootCmd.Get("field_with_type_tag").Bool(),
-				OutFile:           rootCmd.Get("out_file").Str(),
-				OutPath:           rootCmd.Get("query_out_path").Str(),
-				ModelPkgPath:      rootCmd.Get("model_out_path").Str(),
-			}
-		} else {
-			driver, _ = cmd.Flags().GetString(generateModelCmdCfg.Driver.LongHand)
-			url, _ = cmd.Flags().GetString(generateModelCmdCfg.URL.LongHand)
-			schema, _ = cmd.Flags().GetString(generateModelCmdCfg.Schema.LongHand)
+		fieldNullableTmp, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldNullable.LongHand)
+		fieldCoverableTmp, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldCoverable.LongHand)
+		fieldSignableTmp, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldSignable.LongHand)
+		fieldWithIndexTagTmp, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldWithIndexTag.LongHand)
+		fieldWithTypeTagTmp, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldWithTypeTag.LongHand)
+		removeGenDirsTmp, _ := cmd.Flags().GetBool(generateModelCmdCfg.RemoveGeneratedDirs.LongHand)
 
-			fieldNullable, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldNullable.LongHand)
-			fieldCoverable, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldCoverable.LongHand)
-			fieldSignable, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldSignable.LongHand)
-			fieldWithIndexTag, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldWithIndexTag.LongHand)
-			fieldWithTypeTag, _ := cmd.Flags().GetBool(generateModelCmdCfg.FieldWithTypeTag.LongHand)
-			outFile, _ := cmd.Flags().GetString(generateModelCmdCfg.OutFile.LongHand)
-			queryOutPath, _ := cmd.Flags().GetString(generateModelCmdCfg.QueryOutPath.LongHand)
-			modelOutPath, _ := cmd.Flags().GetString(generateModelCmdCfg.ModelOutPath.LongHand)
-			convertTimestamp, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertTimestamp.LongHand)
-			convertDate, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertDate.LongHand)
-			convertBigint, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertBigint.LongHand)
-			convertUUID, _ = cmd.Flags().GetString(generateModelCmdCfg.ConvertUUID.LongHand)
-			lt, _ = cmd.Flags().GetString(generateModelCmdCfg.LanguageType.LongHand)
-			removeGenDirs, _ = cmd.Flags().GetBool(generateModelCmdCfg.RemoveGeneratedDirs.LongHand)
+		driverTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.Driver.LongHand)
+		urlTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.URL.LongHand)
+		schemaTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.Schema.LongHand)
+		outFileTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.OutFile.LongHand)
+		queryOutPathTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.QueryOutPath.LongHand)
+		modelOutPathTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.ModelOutPath.LongHand)
+		convertTimestampTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.ConvertTimestamp.LongHand)
+		convertDateTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.ConvertDate.LongHand)
+		convertBigintTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.ConvertBigint.LongHand)
+		convertUUIDTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.ConvertUUID.LongHand)
+		tsDirTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.TsDir.LongHand)
+		tsFileTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.TsFile.LongHand)
+		tsOutFileTmp, _ := cmd.Flags().GetString(generateModelCmdCfg.TsOutFile.LongHand)
 
-			cfg = gen.Config{
-				FieldNullable:     fieldNullable,
-				FieldCoverable:    fieldCoverable,
-				FieldSignable:     fieldSignable,
-				FieldWithIndexTag: fieldWithIndexTag,
-				FieldWithTypeTag:  fieldWithTypeTag,
-				OutFile:           outFile,
-				OutPath:           queryOutPath,
-				ModelPkgPath:      modelOutPath,
-			}
+		if fieldNullableTmp {
+			fieldNullable = fieldNullableTmp
+		}
+		if fieldCoverableTmp {
+			fieldCoverable = fieldCoverableTmp
+		}
+		if fieldSignableTmp {
+			fieldSignable = fieldSignableTmp
+		}
+		if fieldWithIndexTagTmp {
+			fieldWithIndexTag = fieldWithIndexTagTmp
+		}
+		if fieldWithTypeTagTmp {
+			fieldWithTypeTag = fieldWithTypeTagTmp
+		}
+		if removeGenDirsTmp {
+			removeGenDirs = removeGenDirsTmp
+		}
+
+		if driverTmp != "" {
+			driver = driverTmp
+		}
+		if urlTmp != "" {
+			url = urlTmp
+		}
+		if schemaTmp != "" {
+			schema = schemaTmp
+		}
+		if outFileTmp != "" {
+			outFile = outFileTmp
+		}
+		if queryOutPathTmp != "" {
+			queryOutPath = queryOutPathTmp
+		}
+		if modelOutPathTmp != "" {
+			modelOutPath = modelOutPathTmp
+		}
+		if convertTimestampTmp != "" {
+			convertTimestamp = convertTimestampTmp
+		}
+		if convertDateTmp != "" {
+			convertDate = convertDateTmp
+		}
+		if convertBigintTmp != "" {
+			convertBigint = convertBigintTmp
+		}
+		if convertUUIDTmp != "" {
+			convertUUID = convertUUIDTmp
+		}
+		if tsDirTmp != "" {
+			tsDir = tsDirTmp
+		}
+		if tsFileTmp != "" {
+			tsFile = tsFileTmp
+		}
+		if tsOutFileTmp != "" {
+			tsOutFile = tsOutFileTmp
+		}
+
+		cfg = gen.Config{
+			FieldNullable:     fieldNullable,
+			FieldCoverable:    fieldCoverable,
+			FieldSignable:     fieldSignable,
+			FieldWithIndexTag: fieldWithIndexTag,
+			FieldWithTypeTag:  fieldWithTypeTag,
+			OutFile:           outFile,
+			OutPath:           queryOutPath,
+			ModelPkgPath:      modelOutPath,
 		}
 
 		switch app.DBDriver(driver) {
@@ -248,9 +346,6 @@ to quickly create a Cobra application.`,
 		if err != nil {
 			return fmt.Errorf("model-gen: init db err: %s\n", err.Error())
 		}
-
-		g := gen.NewGenerator(cfg)
-		g.UseDB(gormDB)
 
 		dataMap := map[string]func(detailType string) (dataType string){}
 
@@ -276,9 +371,9 @@ to quickly create a Cobra application.`,
 			}
 		}
 
+		g := gen.NewGenerator(cfg)
+		g.UseDB(gormDB)
 		g.WithDataTypeMap(dataMap)
-
-		fmt.Printf("%s", lt)
 
 		if err = app.GenerateModels(
 			&generator{Generator: g},
@@ -289,8 +384,30 @@ to quickly create a Cobra application.`,
 			return errors.WithStack(err)
 		}
 
-		if lt != "" && lt != "go" && removeGenDirs {
+		nonGoOutput := false
 
+		if tsDir != "" && tsFile != "" {
+			nonGoOutput = true
+
+			fmt.Printf("Generating ts files....\n")
+			fmt.Printf("%s", tsOutFile)
+
+			if err = app.GenerateTsModels(
+				modelOutPath,
+				outFile,
+				tsDir,
+				tsFile,
+				tsOutFile,
+				app.GenerateConfig{},
+			); err != nil {
+				return errors.WithStack(err)
+			}
+		}
+
+		if nonGoOutput && removeGenDirs {
+			if err = app.RemoveGenDirs(queryOutPath, modelOutPath); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -317,56 +434,63 @@ func getDBFromDriver(driver app.DBDriver, url string) (*gorm.DB, error) {
 	return gormDB, err
 }
 
-func rootCmdPreRunValidation(driver app.DBDriver, url, schema string) error {
-	var usingConfig bool
+func rootCmdPreRunValidation(cfg rootValidationConfig) error {
 	var err error
+	var ok bool
+	var rootCmdMap map[string]interface{}
 
 	if err = viper.ReadInConfig(); err == nil {
-		usingConfig = true
-	}
+		rootCmdFromFile := viper.Get("root_cmd")
 
-	if !usingConfig {
-		if driver == "" || url == "" {
-			return errRequiredRootFields
+		if rootCmdFromFile == nil {
+			return errors.WithStack(errRootKeyNotSet)
 		}
 
-		if driver != app.PostgresDriver && driver != app.MysqlDriver &&
-			driver != app.SqliteDriver {
-			return errInvalidDriver
-		}
-
-		if driver == app.PostgresDriver && schema == "" {
-			return errMustSetSchema
+		if rootCmdMap, ok = rootCmdFromFile.(map[string]interface{}); !ok {
+			return errors.WithStack(errRootKeyDictionary)
 		}
 	} else {
-		rootCmdVal := viper.Get("root_cmd")
+		rootCmdMap = make(map[string]interface{})
+	}
 
-		if rootCmdVal == nil {
-			return errRootKeyNotSet
-		}
+	rootCmdObjx := objx.New(rootCmdMap)
 
-		rootCmdMap, ok := rootCmdVal.(map[string]interface{})
+	driver := app.DBDriver(rootCmdObjx.Get("driver").Str())
+	schema := rootCmdObjx.Get("schema").Str()
+	url := rootCmdObjx.Get("url").Str()
+	tsDir := rootCmdObjx.Get("ts_dir").Str()
+	tsFile := rootCmdObjx.Get("ts_file").Str()
 
-		if !ok {
-			return errRootKeyDictionary
-		}
+	if cfg.cli.driver != "" {
+		driver = cfg.cli.driver
+	}
+	if cfg.cli.url != "" {
+		url = cfg.cli.url
+	}
+	if cfg.cli.schema != "" {
+		schema = cfg.cli.schema
+	}
+	if cfg.cli.tsDir != "" {
+		tsDir = cfg.cli.tsDir
+	}
+	if cfg.cli.tsFile != "" {
+		tsFile = cfg.cli.tsFile
+	}
 
-		mapDriver, driverOK := rootCmdMap["driver"]
-		mapURL, urlOK := rootCmdMap["url"]
-		mapSchema, schemaOK := rootCmdMap["schema"]
+	if driver == "" || url == "" {
+		return errors.WithStack(errRequiredRootFields)
+	}
 
-		if (mapDriver == "" || !driverOK) || (mapURL == "" || !urlOK) {
-			return errRequiredRootFieldsConfig
-		}
+	if _, ok = dbDriverMap[driver]; !ok {
+		return errors.WithStack(errInvalidDriver)
+	}
 
-		if mapDriver != string(app.PostgresDriver) && mapDriver != string(app.MysqlDriver) &&
-			mapDriver != string(app.SqliteDriver) {
-			return errInvalidDriverConfig
-		}
+	if driver == app.PostgresDriver && schema == "" {
+		return errors.WithStack(errMustSetSchema)
+	}
 
-		if mapDriver == string(app.PostgresDriver) && (mapSchema == "" || !schemaOK) {
-			return errMustSetSchemaConfig
-		}
+	if (tsDir != "" && tsFile == "") || (tsDir == "" && tsFile != "") {
+		return errors.WithStack(errInvalidTsFileSettings)
 	}
 
 	return nil
@@ -427,7 +551,12 @@ func init() {
 	rootCmd.PersistentFlags().String(
 		generateModelCmdCfg.OutFile.LongHand,
 		"gen.go",
-		"Query code file name",
+		"Query code file name for go",
+	)
+	rootCmd.PersistentFlags().String(
+		generateModelCmdCfg.TsOutFile.LongHand,
+		"gen.ts",
+		"Query code file name for ts",
 	)
 	rootCmd.PersistentFlags().String(
 		generateModelCmdCfg.QueryOutPath.LongHand,
@@ -449,16 +578,11 @@ func init() {
 		"",
 		"Converts any db fields with timestamp data type to one entered",
 	)
-	rootCmd.PersistentFlags().String(
-		generateModelCmdCfg.LanguageType.LongHand,
-		"go",
-		`Determines what language file type the models are output to.  Available options are: "go", "ts"`,
-	)
 	rootCmd.PersistentFlags().Bool(
 		generateModelCmdCfg.RemoveGeneratedDirs.LongHand,
 		false,
-		`If --language-type option is anything but "go", this option will allow cleanup of the generated go
-		files that are created when converting from go to whatever language selected`,
+		`This option will allow cleanup of the generated go files that are created when converting from go
+		to whatever language selected`,
 	)
 
 	rootCmd.MarkFlagRequired(generateModelCmdCfg.Driver.LongHand)
